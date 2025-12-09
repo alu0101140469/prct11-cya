@@ -2,3 +2,6 @@
 0 0
 1 0
 0 1
+
+En vez de todas las aristas posibles, se pasa un fichero con una lista de aristas. Se lee el fichero y se pasa al algoritmo.
+ 
