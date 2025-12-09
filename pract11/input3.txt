@@ -5,3 +5,337 @@
 
 En vez de todas las aristas posibles, se pasa un fichero con una lista de aristas. Se lee el fichero y se pasa al algoritmo.
  
+
+
+
+A continuación te muestro solo los cambios realizados (fragmentos sustituidos / añadidos) para aceptar un fichero con una lista de aristas en lugar de generar todas las posibles. El nuevo comportamiento es: si se pasa -e fichero_aristas.txt el programa leerá ese fichero y usará las aristas que contiene (peso opcional); si no se pasa -e, se mantiene el comportamiento original (genera todas las aristas entre pares de puntos).
+
+
+---
+
+1) point_set.h — cambio en la firma de EMST
+
+Reemplaza la declaración de EMST por la siguiente (añadido el parámetro opcional input_av):
+
+-        /**
+-         * @brief Ejecuta el algoritmo EMST (Kruskal) y guarda el árbol en emst_.
+-         */
+-        void EMST(void);
++        /**
++         * @brief Ejecuta el algoritmo EMST (Kruskal) y guarda el árbol en emst_.
++         *
++         * @param input_av Puntero opcional a un vector de aristas ponderadas. Si es
++         *                 nullptr, se generarán todas las aristas posibles entre
++         *                 pares de puntos (comportamiento original). Si apunta a un
++         *                 CyA::arc_vector, se usará ese conjunto de aristas.
++         */
++        void EMST(const CyA::arc_vector* input_av = nullptr);
+
+
+---
+
+2) point_set.cc — implementación de EMST modificada
+
+Sustituye la implementación de EMST por la versión que acepta el input_av opcional:
+
+-    void point_set::EMST(void)
+-    {
+-        CyA::arc_vector av;
+-        compute_arc_vector(av);
+-
+-        forest st;
+-
+-        // Cada punto comienza como un sub-árbol aislado
+-        for (const CyA::point &p : *this)
+-        {
+-            sub_tree s;
+-            s.add_point(p);
+-
+-            st.push_back(s);
+-        }
+-
+-        // Recorremos aristas por peso creciente (Kruskal)
+-        for (const CyA::weigthed_arc &a : av)
+-        {
+-            int i, j;
+-            find_incident_subtrees(st, a.second, i, j);
+-
+-            if (i == -1 || j == -1)
+-            {
+-                // no se encontraron, debería ser raro, pero saltamos
+-                continue;
+-            }
+-
+-            if (i != j)
+-            {
+-                merge_subtrees(st, a.second, i, j, a.first);
+-            }
+-        }
+-
+-        // Tras las fusiones, si existe un único componente lo guardamos
+-        if (!st.empty())
+-        {
+-            emst_ = st[0].get_arcs();
+-        }
+-    }
++    void point_set::EMST(const CyA::arc_vector* input_av)
++    {
++        CyA::arc_vector av;
++
++        // Si se nos proporciona un vector de aristas externo, lo usamos.
++        // Si no, generamos todas las aristas posibles entre pares (comportamiento original).
++        if (input_av != nullptr)
++        {
++            av = *input_av;
++        }
++        else
++        {
++            compute_arc_vector(av);
++        }
++
++        forest st;
++
++        // Cada punto comienza como un sub-árbol aislado
++        for (const CyA::point &p : *this)
++        {
++            sub_tree s;
++            s.add_point(p);
++
++            st.push_back(s);
++        }
++
++        // Recorremos aristas por peso creciente (Kruskal)
++        for (const CyA::weigthed_arc &a : av)
++        {
++            int i, j;
++            find_incident_subtrees(st, a.second, i, j);
++
++            if (i == -1 || j == -1)
++            {
++                // no se encontraron, saltamos
++                continue;
++            }
++
++            if (i != j)
++            {
++                merge_subtrees(st, a.second, i, j, a.first);
++            }
++        }
++
++        // Tras las fusiones, si existe al menos un componente lo guardamos
++        if (!st.empty())
++        {
++            emst_ = st[0].get_arcs();
++        }
++    }
+
+
+---
+
+3) main.cc — parseo de opción -e y nueva función para leer fichero de aristas
+
+Añade la función auxiliar read_arcs_file (antes de main) y en el parseo de argumentos añade la opción -e fichero_aristas.txt. Sólo muestro las adiciones/modificaciones relacionadas (reemplaza/añade en los lugares correspondientes):
+
+(a) Añade la función de lectura de fichero de aristas — pegar antes de main):
+
+/**
+ * @brief Lee un fichero de aristas en varios formatos simples:
+ *        - Opción A (con contador): primera línea m, luego m líneas con:
+ *              x1 y1 x2 y2 [weight]
+ *        - Opción B (sin contador): m líneas, cada una con:
+ *              x1 y1 x2 y2 [weight]
+ *
+ * @param filename nombre del fichero
+ * @param av vector de salida (rellenado con (peso, (p1,p2)))
+ * @return true si lectura correcta, false en caso de error
+ */
+static bool read_arcs_file(const std::string &filename, CyA::arc_vector &av)
+{
+    std::ifstream ifs(filename.c_str());
+    if (!ifs)
+    {
+        std::cerr << "ERROR: no se puede abrir fichero de aristas: " << filename << std::endl;
+        return false;
+    }
+
+    // Leemos todas las líneas no vacías ni comentarios
+    std::vector<std::string> lines;
+    std::string raw;
+    while (std::getline(ifs, raw))
+    {
+        // Trim simple (eliminar espacios al inicio/fin)
+        size_t start = raw.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) continue;
+        size_t end = raw.find_last_not_of(" \t\r\n");
+        std::string line = raw.substr(start, end - start + 1);
+        if (line.empty()) continue;
+        if (line[0] == '#') continue; // comentario
+        lines.push_back(line);
+    }
+
+    if (lines.empty())
+    {
+        // fichero vacío (se considera válido pero sin aristas)
+        av.clear();
+        return true;
+    }
+
+    // Decidir si primera línea es contador: token único y coincide con lines.size()-1
+    bool has_count = false;
+    size_t start_index = 0;
+    {
+        std::istringstream iss(lines[0]);
+        int v;
+        if ((iss >> v) && iss.eof())
+        {
+            // primer token es un entero; comprobamos que coincide con número de líneas restantes
+            if (static_cast<size_t>(v) == lines.size() - 1)
+            {
+                has_count = true;
+                start_index = 1;
+            }
+        }
+    }
+
+    av.clear();
+    // Procesamos cada línea que representa una arista
+    for (size_t i = start_index; i < lines.size(); ++i)
+    {
+        std::istringstream iss(lines[i]);
+        std::vector<double> nums;
+        double val;
+        while (iss >> val)
+        {
+            nums.push_back(val);
+        }
+
+        if (nums.size() < 4)
+        {
+            std::cerr << "WARNING: línea ignorada (menos de 4 números): " << lines[i] << std::endl;
+            continue;
+        }
+
+        CyA::point p1 = std::make_pair(nums[0], nums[1]);
+        CyA::point p2 = std::make_pair(nums[2], nums[3]);
+
+        double weight = 0.0;
+        if (nums.size() >= 5)
+        {
+            weight = nums[4];
+        }
+        else
+        {
+            // calcular distancia euclídea si no se proporcionó peso
+            const double dx = p1.first - p2.first;
+            const double dy = p1.second - p2.second;
+            weight = std::sqrt(dx * dx + dy * dy);
+        }
+
+        av.push_back(std::make_pair(weight, std::make_pair(p1, p2)));
+    }
+
+    // Ordenamos las aristas por peso ascendente (como hace compute_arc_vector)
+    std::sort(av.begin(), av.end());
+    return true;
+}
+
+(b) Modifica el parseo de argumentos en main para aceptar -e fichero (fragmento del main con la parte de parseo):
+
+-    // Parseo simple de argumentos: -d fichero.dot
+-    string dot_file;
+-    for (int i = 1; i < argc; ++i)
+-    {
+-        string arg(argv[i]);
+-        if (arg == "-d" && i + 1 < argc)
+-        {
+-            dot_file = argv[++i];
+-        }
+-        else if (arg == "-h" || arg == "--help")
+-        {
+-            cout << "Uso: " << argv[0] << " [-d fichero.dot]" << endl;
+-            return 0;
+-        }
+-        else
+-        {
+-            cerr << "Argumento desconocido: " << arg << endl;
+-            cout << "Uso: " << argv[0] << " [-d fichero.dot]" << endl;
+-            return 1;
+-        }
+-    }
++    // Parseo simple de argumentos:
++    //   -d fichero.dot    => genera fichero DOT
++    //   -e fichero_aristas => usa fichero de aristas en lugar de generar todas las aristas
++    string dot_file;
++    string edges_file;
++    for (int i = 1; i < argc; ++i)
++    {
++        string arg(argv[i]);
++        if (arg == "-d" && i + 1 < argc)
++        {
++            dot_file = argv[++i];
++        }
++        else if (arg == "-e" && i + 1 < argc)
++        {
++            edges_file = argv[++i];
++        }
++        else if (arg == "-h" || arg == "--help")
++        {
++            cout << "Uso: " << argv[0] << " [-d fichero.dot] [-e fichero_aristas]" << endl;
++            return 0;
++        }
++        else
++        {
++            cerr << "Argumento desconocido: " << arg << endl;
++            cout << "Uso: " << argv[0] << " [-d fichero.dot] [-e fichero_aristas]" << endl;
++            return 1;
++        }
++    }
+
+(c) Cambio en la llamada a EMST (al final de main, sustituye la invocación actual por lo siguiente):
+
+-    // Construimos point_set y calculamos EMST
+-    point_set ps(points);
+-    ps.EMST();
++    // Construimos point_set y calculamos EMST
++    point_set ps(points);
++
++    if (!edges_file.empty())
++    {
++        CyA::arc_vector av;
++        if (!read_arcs_file(edges_file, av))
++        {
++            cerr << "ERROR: lectura de fichero de aristas fallida: " << edges_file << endl;
++            return 1;
++        }
++        // Ejecutamos EMST usando las aristas leídas
++        ps.EMST(&av);
++    }
++    else
++    {
++        // Comportamiento original: generar todas las aristas entre pares
++        ps.EMST(nullptr);
++    }
+
+
+---
+
+Formato del fichero de aristas aceptado
+
+Dos formatos reconocidos:
+
+1. Con contador: primera línea m (entero), luego m líneas con:
+x1 y1 x2 y2  o  x1 y1 x2 y2 weight
+(por ejemplo: 0 0 1 0 1.0 o 0 0 1 0)
+
+
+2. Sin contador: cada línea corresponde a una arista y contiene x1 y1 x2 y2 o x1 y1 x2 y2 weight. Líneas vacías y líneas que empiezan por # se ignoran.
+
+
+
+Si el weight no está presente, el programa calcula la distancia euclídea entre (x1,y1) y (x2,y2).
+
+
+
+---
+
+Eso es todo — con estos cambios el programa puede recibir un fichero con aristas (-e fichero_aristas.txt) o comportarse como antes (generar todas las aristas). ¿Quieres que además genere un mensaje de ayuda (--help) detallando el formato de fichero, o que implemente validaciones adicionales (p. ej. asegurar que todos los puntos de las aristas están en el conjunto leído)?
